@@ -1,4 +1,44 @@
+# ============================================================
+# APLIKASI PEMANTAUAN TUMPAHAN MINYAK — PULAU SEMAU, NTT
+# Periode: 29 Juli – 31 Agustus 2026
+# Sumber Data: Sentinel-1 (SAR) — ASF DAAC NASA
+# ============================================================
+
+# ⚠️ IMPOR PUSTAKA WAJIB DI PALING ATAS!
+import os
+import asf_search as asf
+import rasterio
+import numpy as np
+import streamlit as st
+from datetime import datetime
+
+# ✅ BARIS INI HARUS SETELAH IMPORT & SEBELUM PERINTAH ST LAINNYA
 st.set_page_config(page_title="Pemantauan Tumpahan Minyak — Pulau Semau", layout="wide")
+
+# ---------------------------
+# KONFIGURASI DASAR
+# ---------------------------
+BBOX = {
+    "min_lon": 123.45,
+    "max_lon": 123.65,
+    "min_lat": -10.30,
+    "max_lat": -10.10,
+}
+
+START_DATE = "2026-07-29"
+END_DATE   = "2026-08-31"
+
+PLATFORM      = "SENTINEL-1"
+PRODUCT_TYPE  = "GRD"
+BEAM_MODE     = "IW"
+POLARISATION  = "VV+VH"
+
+AMBANG_BATAS_DETEKSI = -18  # dB — sesuaikan jika perlu
+LOKASI_SIMPAN_DATA   = "./data/"
+
+# ---------------------------
+# ANTARMUKA APLIKASI
+# ---------------------------
 st.title("🛰️ Pemantauan Tumpahan Minyak — Pulau Semau, NTT")
 st.subheader("Periode: 29 Juli – 31 Agustus 2026")
 
