@@ -4,15 +4,14 @@
 # Sumber Data: Sentinel-1 (SAR) — ASF DAAC NASA
 # ============================================================
 
-# ⚠️ IMPOR PUSTAKA WAJIB DI PALING ATAS!
+# ⚠️ IMPOR PUSTAKA — WAJIB DI PALING ATAS
 import os
 import asf_search as asf
 import rasterio
 import numpy as np
 import streamlit as st
-from datetime import datetime
 
-# ✅ BARIS INI HARUS SETELAH IMPORT & SEBELUM PERINTAH ST LAINNYA
+# ✅ KONFIGURASI HALAMAN — HARUS SETELAH IMPORT & SEBELUM YANG LAIN
 st.set_page_config(page_title="Pemantauan Tumpahan Minyak — Pulau Semau", layout="wide")
 
 # ---------------------------
@@ -33,11 +32,11 @@ PRODUCT_TYPE  = "GRD"
 BEAM_MODE     = "IW"
 POLARISATION  = "VV+VH"
 
-AMBANG_BATAS_DETEKSI = -18  # dB — sesuaikan jika perlu
+AMBANG_BATAS_DETEKSI = -18
 LOKASI_SIMPAN_DATA   = "./data/"
 
 # ---------------------------
-# ANTARMUKA APLIKASI
+# JUDUL & INFORMASI APLIKASI
 # ---------------------------
 st.title("🛰️ Pemantauan Tumpahan Minyak — Pulau Semau, NTT")
 st.subheader("Periode: 29 Juli – 31 Agustus 2026")
@@ -47,8 +46,9 @@ st.info("""
 🔑 Sumber kejadian: Kebocoran KM Kuala Emas, 29 Juli 2026
 🛰️ Sumber data: Sentinel-1 (SAR) — ASF DAAC NASA
 """)
+
 # ---------------------------
-# FUNGSI: CARI DATA SATELIT (DIPERBAIKI)
+# FUNGSI: CARI DATA SATELIT — SUDAH DIPERBAIKI
 # ---------------------------
 def cari_data_sentinel1():
     hasil = asf.search(
@@ -56,29 +56,27 @@ def cari_data_sentinel1():
         processingLevel=PRODUCT_TYPE,
         beamMode=BEAM_MODE,
         polarization=POLARISATION,
-        start=datetime.fromisoformat(START_DATE),
-        end=datetime.fromisoformat(END_DATE),
+        start=START_DATE + "T00:00:00Z",
+        end=END_DATE + "T23:59:59Z",
         bbox=[
-            BBOX["min_lon"],   # Bujur Barat
-            BBOX["min_lat"],   # Lintang Selatan
-            BBOX["max_lon"],   # Bujur Timur
-            BBOX["max_lat"]    # Lintang Utara
+            BBOX["min_lon"],
+            BBOX["min_lat"],
+            BBOX["max_lon"],
+            BBOX["max_lat"]
         ]
     )
     
-    # Ubah hasil pencarian menjadi daftar yang bisa dibaca Streamlit
     daftar_hasil = []
     for citra in hasil:
+        props = citra.properties
         daftar_hasil.append({
-            "Tanggal Rekam": citra.properties.get("startTime", "")[:10],
-            "Jam Rekam":     citra.properties.get("startTime", "")[11:16],
-            "Produk":        citra.properties.get("productType", ""),
-            "Resolusi":      citra.properties.get("resolution", ""),
-            "Tautan Unduh":  citra.properties.get("url", "")
+            "Tanggal Rekam": props.get("startTime", "")[:10],
+            "Jam Rekam":     props.get("startTime", "")[11:16],
+            "Produk":        props.get("productType", ""),
+            "Resolusi":      props.get("resolution", ""),
+            "Tautan Unduh":  props.get("url", "")
         })
     return daftar_hasil
-
-
 
 # ---------------------------
 # FUNGSI: UNDUH CITRA
@@ -94,16 +92,11 @@ def unduh_citra(tautan):
 # ---------------------------
 def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI):
     with rasterio.open(jalur_citra) as src:
-        data = src.read(1)  # Band VV
+        data = src.read(1)
         meta = src.meta
 
-    # Konversi ke desibel (dB)
     data_dB = 10 * np.log10(np.absolute(data) + 1e-10)
-
-    # Area di bawah ambang batas = calon tumpahan minyak
     mask_tumpahan = data_dB < ambang_batas
-
-    # Hitung luasan (asumsi piksel 10m × 10m = 100 m²)
     piksel_tumpah = np.sum(mask_tumpahan)
     luasan_m2  = piksel_tumpah * 100
     luasan_km2 = round(luasan_m2 / 1_000_000, 4)
@@ -111,7 +104,7 @@ def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI):
     return mask_tumpahan, luasan_km2, data_dB
 
 # ---------------------------
-# ALUR UTAMA APLIKASI
+# TAMPILAN UTAMA — 3 TAB
 # ---------------------------
 tab1, tab2, tab3 = st.tabs(["🔍 Cari Citra", "📥 Unduh", "📊 Analisis"])
 
@@ -120,17 +113,7 @@ with tab1:
         with st.spinner("Mencari citra Sentinel-1 yang mencakup area..."):
             daftar_citra = cari_data_sentinel1()
             st.success(f"✅ Ditemukan {len(daftar_citra)} citra yang sesuai!")
-
-            data_tabel = []
-            for citra in daftar_citra:
-                data_tabel.append({
-                    "Tanggal Rekam": citra.properties["startTime"][:10],
-                    "Jam Rekam":     citra.properties["startTime"][11:16],
-                    "Produk":        citra.properties["productType"],
-                    "Resolusi":      citra.properties["resolution"],
-                    "Tautan Unduh":  citra.properties["url"]
-                })
-            st.dataframe(data_tabel, use_container_width=True)
+            st.dataframe(daftar_citra, use_container_width=True)
 
 with tab2:
     st.subheader("Pengunduhan Citra")
