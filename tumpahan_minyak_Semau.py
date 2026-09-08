@@ -47,9 +47,8 @@ st.info("""
 🔑 Sumber kejadian: Kebocoran KM Kuala Emas, 29 Juli 2026
 🛰️ Sumber data: Sentinel-1 (SAR) — ASF DAAC NASA
 """)
-
 # ---------------------------
-# FUNGSI: CARI DATA SATELIT
+# FUNGSI: CARI DATA SATELIT (DIPERBAIKI)
 # ---------------------------
 def cari_data_sentinel1():
     hasil = asf.search(
@@ -60,11 +59,26 @@ def cari_data_sentinel1():
         start=datetime.fromisoformat(START_DATE),
         end=datetime.fromisoformat(END_DATE),
         bbox=[
-            BBOX["min_lon"], BBOX["min_lat"],
-            BBOX["max_lon"], BBOX["max_lat"]
+            BBOX["min_lon"],   # Bujur Barat
+            BBOX["min_lat"],   # Lintang Selatan
+            BBOX["max_lon"],   # Bujur Timur
+            BBOX["max_lat"]    # Lintang Utara
         ]
     )
-    return hasil
+    
+    # Ubah hasil pencarian menjadi daftar yang bisa dibaca Streamlit
+    daftar_hasil = []
+    for citra in hasil:
+        daftar_hasil.append({
+            "Tanggal Rekam": citra.properties.get("startTime", "")[:10],
+            "Jam Rekam":     citra.properties.get("startTime", "")[11:16],
+            "Produk":        citra.properties.get("productType", ""),
+            "Resolusi":      citra.properties.get("resolution", ""),
+            "Tautan Unduh":  citra.properties.get("url", "")
+        })
+    return daftar_hasil
+
+
 
 # ---------------------------
 # FUNGSI: UNDUH CITRA
