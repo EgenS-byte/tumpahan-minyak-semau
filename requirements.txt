@@ -1,4 +1,4 @@
 streamlit
-asf-search
+asf-search>=6.0.0
 rasterio
 numpy
