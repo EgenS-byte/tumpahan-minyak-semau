@@ -58,16 +58,63 @@ st.sidebar.caption(
 earthdata_user = st.sidebar.text_input("Username Earthdata")
 earthdata_pass = st.sidebar.text_input("Password Earthdata", type="password")
 
+if "earthdata_session" not in st.session_state:
+    st.session_state.earthdata_session = None
+if "earthdata_login_ok" not in st.session_state:
+    st.session_state.earthdata_login_ok = False
+
+
+def _ekstrak_link_approve(pesan_error: str):
+    """Ambil URL 'approve_app' dari pesan error 401 ASF, kalau ada."""
+    import re
+    m = re.search(r"https://urs\.earthdata\.nasa\.gov/approve_app\?[^\s\"'<]+", pesan_error)
+    return m.group(0) if m else None
+
+
+def login_earthdata():
+    """Coba login ke NASA Earthdata dan simpan sesi di session_state."""
+    if not earthdata_user or not earthdata_pass:
+        st.sidebar.warning("Isi username dan password terlebih dahulu.")
+        return
+
+    with st.sidebar.status("Mencoba login ke NASA Earthdata...", expanded=False):
+        try:
+            sesi = asf.ASFSession().auth_with_creds(earthdata_user, earthdata_pass)
+            st.session_state.earthdata_session = sesi
+            st.session_state.earthdata_login_ok = True
+        except Exception as e:
+            st.session_state.earthdata_session = None
+            st.session_state.earthdata_login_ok = False
+            pesan = str(e)
+            link_approve = _ekstrak_link_approve(pesan)
+
+            if "401" in pesan or "Unauthorized" in pesan:
+                st.sidebar.error("❌ Login gagal: kredensial salah atau aplikasi belum diotorisasi.")
+            else:
+                st.sidebar.error(f"❌ Login gagal: {pesan}")
+
+            if link_approve:
+                st.sidebar.warning(
+                    "Akun Earthdata Anda belum memberi izin ke aplikasi ASF Search. "
+                    "Ini wajib dilakukan **satu kali** lewat browser:"
+                )
+                st.sidebar.link_button("🔗 Beri Izin (Authorize) di NASA Earthdata", link_approve)
+                st.sidebar.caption(
+                    "Setelah klik link di atas dan menekan tombol Authorize di halaman NASA, "
+                    "kembali ke sini dan klik 'Login Earthdata' lagi."
+                )
+
+
+if st.sidebar.button("🔑 Login Earthdata", type="primary"):
+    login_earthdata()
+
+if st.session_state.earthdata_login_ok:
+    st.sidebar.success(f"✅ Berhasil login sebagai **{earthdata_user}**")
+
 
 def buat_sesi_earthdata():
-    """Buat sesi terautentikasi ke NASA Earthdata untuk keperluan unduh."""
-    if not earthdata_user or not earthdata_pass:
-        return None
-    try:
-        return asf.ASFSession().auth_with_creds(earthdata_user, earthdata_pass)
-    except Exception as e:
-        st.sidebar.error(f"Gagal login Earthdata: {e}")
-        return None
+    """Kembalikan sesi Earthdata yang sudah login, atau None kalau belum."""
+    return st.session_state.earthdata_session
 
 
 # ---------------------------
@@ -108,7 +155,8 @@ def cari_data_sentinel1():
 def unduh_citra(tautan, sesi):
     if sesi is None:
         raise ValueError(
-            "Belum login ke NASA Earthdata. Isi username & password di sidebar terlebih dahulu."
+            "Belum login ke NASA Earthdata. Isi username & password di sidebar, "
+            "lalu klik tombol '🔑 Login Earthdata' terlebih dahulu."
         )
     os.makedirs(LOKASI_SIMPAN_DATA, exist_ok=True)
     asf.download_url(url=tautan, path=LOKASI_SIMPAN_DATA, session=sesi)
