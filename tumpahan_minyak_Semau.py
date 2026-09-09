@@ -10,6 +10,7 @@ import traceback
 
 import asf_search as asf
 import rasterio
+from rasterio.enums import Resampling
 import numpy as np
 import streamlit as st
 
@@ -191,14 +192,42 @@ def cari_band_pengukuran(jalur_zip):
 # ---------------------------
 # FUNGSI DETEKSI TUMPAHAN
 # ---------------------------
-def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI):
+def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI, maks_dimensi=3000):
+    """
+    Mendeteksi area tumpahan dari citra SAR.
+
+    Citra Sentinel-1 GRD resolusi penuh bisa berukuran puluhan ribu x puluhan ribu
+    piksel. Membacanya langsung ke memori (apalagi sebagai float64) bisa memakai
+    beberapa GB RAM dan membuat app di-kill oleh server (muncul sebagai halaman
+    "Oh no." di Streamlit, bukan pesan error biasa).
+
+    Untuk itu, citra dibaca dalam resolusi yang sudah diperkecil (downsampled)
+    langsung dari disk lewat parameter out_shape milik rasterio — jadi RAM yang
+    dipakai tetap kecil berapa pun ukuran file aslinya. Ukuran piksel disesuaikan
+    proporsional agar estimasi luas tetap akurat.
+    """
     jalur_baca = cari_band_pengukuran(jalur_citra)
 
     with rasterio.open(jalur_baca) as src:
-        data = src.read(1).astype(np.float64)
-        pixel_area_m2 = abs(src.res[0] * src.res[1])
+        tinggi_asli, lebar_asli = src.height, src.width
+        faktor = max(1, max(tinggi_asli, lebar_asli) // maks_dimensi)
+        out_h = max(1, tinggi_asli // faktor)
+        out_w = max(1, lebar_asli // faktor)
+
+        data = src.read(
+            1,
+            out_shape=(out_h, out_w),
+            resampling=Resampling.average,
+        ).astype(np.float32)
+
+        # Sesuaikan luas per piksel dengan faktor downsample yang dipakai
+        res_x = src.res[0] * (lebar_asli / out_w)
+        res_y = src.res[1] * (tinggi_asli / out_h)
+        pixel_area_m2 = abs(res_x * res_y)
 
     data_dB = 10 * np.log10(np.abs(data) + 1e-10)
+    del data  # bebaskan memori array resolusi menengah secepat mungkin
+
     mask_tumpahan = data_dB < ambang_batas
     piksel_tumpah = int(np.sum(mask_tumpahan))
     luasan_m2 = piksel_tumpah * pixel_area_m2
@@ -308,6 +337,11 @@ with tab3:
         jalur_berkas = jalur_manual
 
     ambang_pilih = st.slider("Ambang batas deteksi (dB)", -30, -10, AMBANG_BATAS_DETEKSI)
+    st.caption(
+        "ℹ️ Citra otomatis diproses dalam resolusi yang diperkecil untuk menghindari "
+        "kehabisan memori server. Ini memengaruhi tingkat detail, bukan validitas "
+        "perkiraan luas area secara keseluruhan."
+    )
 
     if st.button("🚀 Jalankan Analisis") and jalur_berkas:
         try:
