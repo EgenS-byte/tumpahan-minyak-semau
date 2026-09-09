@@ -5,13 +5,17 @@
 # ============================================================
 
 import os
+import re
 import zipfile
 import traceback
+from datetime import datetime, timezone
 
 import asf_search as asf
 import rasterio
 from rasterio.enums import Resampling
 import numpy as np
+import pandas as pd
+import requests
 import streamlit as st
 
 st.set_page_config(page_title="Pemantauan Tumpahan Minyak — Pulau Semau", layout="wide")
@@ -34,6 +38,16 @@ TANGGAL_AKHIR = "2026-08-31T23:59:59Z"
 
 AMBANG_BATAS_DETEKSI = -18
 LOKASI_SIMPAN_DATA = "./data/"
+RIWAYAT_CSV = os.path.join(LOKASI_SIMPAN_DATA, "riwayat_analisis.csv")
+
+# Titik tengah area kejadian, dipakai untuk mengambil data angin historis
+CENTROID_LON = (BBOX[0] + BBOX[2]) / 2
+CENTROID_LAT = (BBOX[1] + BBOX[3]) / 2
+
+# Rentang kecepatan angin (m/s) di mana deteksi tumpahan minyak dari SAR dianggap
+# valid secara operasional (referensi umum: NOAA / EU Copernicus EMSA CleanSeaNet)
+AMBANG_ANGIN_MIN_MS = 3.0
+AMBANG_ANGIN_MAKS_MS = 10.0
 
 # ---------------------------
 # JUDUL & INFORMASI
@@ -237,9 +251,111 @@ def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI, maks_dimens
 
 
 # ---------------------------
+# FUNGSI EKSTRAKSI WAKTU AKUISISI DARI NAMA FILE
+# ---------------------------
+def ekstrak_waktu_dari_nama(jalur_berkas):
+    """
+    Nama file Sentinel-1 mengandung timestamp akuisisi, contoh:
+    S1D_IW_GRDH_1SDV_20260828T212021_20260828T212050_004331_007FD7_7346.zip
+    Fungsi ini mengambil timestamp PERTAMA (waktu mulai rekam) sebagai datetime UTC.
+    Mengembalikan None kalau polanya tidak ditemukan.
+    """
+    nama = os.path.basename(jalur_berkas)
+    m = re.search(r"(\d{8})T(\d{6})", nama)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+# ---------------------------
+# FUNGSI AMBIL KECEPATAN ANGIN HISTORIS (Open-Meteo Archive API — gratis, tanpa API key)
+# ---------------------------
+def ambil_kecepatan_angin(lat, lon, waktu_utc):
+    """
+    Mengambil kecepatan angin 10m (m/s) paling dekat dengan waktu_utc, di koordinat
+    yang diberikan, lewat Open-Meteo Historical Weather API.
+    """
+    tanggal = waktu_utc.strftime("%Y-%m-%d")
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": tanggal,
+        "end_date": tanggal,
+        "hourly": "windspeed_10m",
+        "windspeed_unit": "ms",
+        "timezone": "UTC",
+    }
+    resp = requests.get(url, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+
+    waktu_list = data.get("hourly", {}).get("time", [])
+    angin_list = data.get("hourly", {}).get("windspeed_10m", [])
+    if not waktu_list or not angin_list:
+        raise ValueError("Data angin tidak tersedia untuk tanggal/lokasi ini.")
+
+    # Cari jam yang paling dekat dengan waktu akuisisi citra
+    target = waktu_utc.strftime("%Y-%m-%dT%H:00")
+    if target in waktu_list:
+        idx = waktu_list.index(target)
+    else:
+        idx = min(range(len(waktu_list)), key=lambda i: abs(i - waktu_utc.hour))
+
+    return angin_list[idx]
+
+
+def nilai_validitas_angin(kecepatan_ms):
+    """Menilai apakah kecepatan angin berada di rentang valid untuk deteksi SAR."""
+    if kecepatan_ms is None:
+        return "Tidak diketahui", "warning"
+    if kecepatan_ms < AMBANG_ANGIN_MIN_MS:
+        return (
+            f"⚠️ Terlalu tenang ({kecepatan_ms:.1f} m/s) — risiko salah deteksi "
+            f"sebagai look-alike alami (mis. biogenic slick)",
+            "warning",
+        )
+    if kecepatan_ms > AMBANG_ANGIN_MAKS_MS:
+        return (
+            f"⚠️ Terlalu kencang ({kecepatan_ms:.1f} m/s) — sinyal tumpahan minyak "
+            f"berisiko tertutup gelombang",
+            "warning",
+        )
+    return f"✅ Valid ({kecepatan_ms:.1f} m/s) — dalam rentang operasional 3–10 m/s", "success"
+
+
+# ---------------------------
+# FUNGSI RIWAYAT TIME-SERIES
+# ---------------------------
+KOLOM_RIWAYAT = [
+    "Tanggal Citra", "Jam Citra (UTC)", "Luas (km2)", "Ambang (dB)",
+    "Kecepatan Angin (m/s)", "Validitas Angin", "Berkas", "Waktu Analisis",
+]
+
+
+def muat_riwayat():
+    if os.path.exists(RIWAYAT_CSV):
+        return pd.read_csv(RIWAYAT_CSV)
+    return pd.DataFrame(columns=KOLOM_RIWAYAT)
+
+
+def simpan_baris_riwayat(baris: dict):
+    os.makedirs(LOKASI_SIMPAN_DATA, exist_ok=True)
+    df = muat_riwayat()
+    df = pd.concat([df, pd.DataFrame([baris])], ignore_index=True)
+    df.to_csv(RIWAYAT_CSV, index=False)
+    return df
+
+
+# ---------------------------
 # TAMPILAN APLIKASI
 # ---------------------------
-tab1, tab2, tab3 = st.tabs(["🔍 Cari Citra", "📥 Unduh", "📊 Analisis"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Cari Citra", "📥 Unduh", "📊 Analisis", "📈 Time Series"])
 
 with tab1:
     if st.button("🔍 Cari Citra Satelit", type="primary"):
@@ -350,10 +466,105 @@ with tab3:
             st.metric("📐 Luas perkiraan tumpahan", f"{luas} km²")
             st.info(f"Ambang batas yang digunakan: {ambang_pilih} dB")
             st.warning("⚠️ Hasil berupa perkiraan — perlu verifikasi lapangan atau visual.")
+
+            # ---------------------------
+            # WAKTU AKUISISI + VALIDASI ANGIN
+            # ---------------------------
+            st.markdown("### 🌬️ Validasi Kecepatan Angin")
+            waktu_citra = ekstrak_waktu_dari_nama(jalur_berkas)
+
+            if waktu_citra is None:
+                st.caption(
+                    "Tidak bisa membaca tanggal/jam otomatis dari nama file. "
+                    "Isi manual di bawah untuk validasi angin:"
+                )
+                col_a, col_b = st.columns(2)
+                tgl_manual = col_a.date_input("Tanggal akuisisi citra")
+                jam_manual = col_b.time_input("Jam akuisisi (UTC)")
+                waktu_citra = datetime.combine(tgl_manual, jam_manual).replace(tzinfo=timezone.utc)
+
+            kecepatan_angin = None
+            try:
+                with st.spinner("Mengambil data angin historis (Open-Meteo)..."):
+                    kecepatan_angin = ambil_kecepatan_angin(CENTROID_LAT, CENTROID_LON, waktu_citra)
+                pesan_validitas, tipe_pesan = nilai_validitas_angin(kecepatan_angin)
+                col_x, col_y = st.columns(2)
+                col_x.metric("💨 Kecepatan angin saat akuisisi", f"{kecepatan_angin:.1f} m/s")
+                if tipe_pesan == "success":
+                    col_y.success(pesan_validitas)
+                else:
+                    col_y.warning(pesan_validitas)
+            except Exception as e:
+                st.warning(f"Tidak bisa mengambil data angin: {e}")
+
+            # ---------------------------
+            # SIMPAN KE RIWAYAT TIME-SERIES
+            # ---------------------------
+            simpan_baris_riwayat({
+                "Tanggal Citra": waktu_citra.strftime("%Y-%m-%d"),
+                "Jam Citra (UTC)": waktu_citra.strftime("%H:%M"),
+                "Luas (km2)": luas,
+                "Ambang (dB)": ambang_pilih,
+                "Kecepatan Angin (m/s)": round(kecepatan_angin, 1) if kecepatan_angin is not None else None,
+                "Validitas Angin": nilai_validitas_angin(kecepatan_angin)[0] if kecepatan_angin is not None else "Tidak diketahui",
+                "Berkas": os.path.basename(jalur_berkas),
+                "Waktu Analisis": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            st.success("📈 Hasil analisis ini sudah ditambahkan ke tab **Time Series**.")
         except Exception as e:
             st.error(f"❌ Gagal memproses citra: {e}")
             with st.expander("Detail error"):
                 st.code(traceback.format_exc())
+
+with tab4:
+    st.subheader("📈 Perubahan Luas Tumpahan dari Waktu ke Waktu")
+
+    df_riwayat = muat_riwayat()
+
+    if df_riwayat.empty:
+        st.info(
+            "Belum ada data riwayat. Jalankan analisis di tab **📊 Analisis** terlebih "
+            "dahulu — setiap hasil analisis otomatis tercatat di sini."
+        )
+    else:
+        df_plot = df_riwayat.copy()
+        df_plot["Tanggal Citra"] = pd.to_datetime(df_plot["Tanggal Citra"])
+        df_plot = df_plot.sort_values("Tanggal Citra")
+
+        st.line_chart(df_plot.set_index("Tanggal Citra")["Luas (km2)"])
+
+        st.markdown("**Tabel riwayat lengkap:**")
+        st.dataframe(df_riwayat, use_container_width=True)
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.download_button(
+                "⬇️ Unduh Riwayat (.csv)",
+                data=df_riwayat.to_csv(index=False).encode("utf-8"),
+                file_name="riwayat_analisis_tumpahan_minyak.csv",
+                mime="text/csv",
+            )
+
+        with col2:
+            if st.button("🗑️ Hapus Semua Riwayat"):
+                if os.path.exists(RIWAYAT_CSV):
+                    os.remove(RIWAYAT_CSV)
+                st.rerun()
+
+    st.divider()
+    st.markdown("**📤 Muat riwayat lama** (misalnya setelah app di-reboot dan data sebelumnya hilang):")
+    berkas_riwayat_lama = st.file_uploader("Upload file riwayat_analisis.csv sebelumnya", type=["csv"])
+    if berkas_riwayat_lama is not None:
+        try:
+            df_lama = pd.read_csv(berkas_riwayat_lama)
+            df_gabung = pd.concat([muat_riwayat(), df_lama], ignore_index=True).drop_duplicates()
+            os.makedirs(LOKASI_SIMPAN_DATA, exist_ok=True)
+            df_gabung.to_csv(RIWAYAT_CSV, index=False)
+            st.success(f"✅ {len(df_lama)} baris riwayat berhasil digabungkan.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Gagal membaca file riwayat: {e}")
 
 st.divider()
 st.caption("""
