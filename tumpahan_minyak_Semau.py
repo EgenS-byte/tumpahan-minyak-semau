@@ -23,10 +23,23 @@ import streamlit as st
 st.set_page_config(page_title="Pemantauan Tumpahan Minyak — Pulau Semau", layout="wide")
 
 # ---------------------------
-# KONFIGURASI — AREA SUDAH DIPERKECIL
+# KONFIGURASI — AREA DISESUAIKAN DENGAN LOKASI AKURAT PULAU SEMAU
 # ---------------------------
-# Batas presisi di sekitar titik kejadian KM Kuala Emas
-BBOX = [123.50, -10.22, 123.60, -10.14]  # [minLon, minLat, maxLon, maxLat]
+# Koordinat titik kejadian dikonfirmasi dari Google Earth:
+# 10°13'24" LS, 123°26'24" BT  →  desimal: -10.223333, 123.440000
+TITIK_KEJADIAN_LAT = -10.223333
+TITIK_KEJADIAN_LON = 123.440000
+
+# Batas area pencarian — diperkecil & dipusatkan tepat di titik kejadian
+# (sebelumnya area salah lokasi & terlalu besar, sekarang ~36 km² di sekitar titik)
+_SETENGAH_LEBAR_LON = 0.03   # ± derajat bujur dari titik kejadian
+_SETENGAH_TINGGI_LAT = 0.025  # ± derajat lintang dari titik kejadian
+BBOX = [
+    round(TITIK_KEJADIAN_LON - _SETENGAH_LEBAR_LON, 6),   # minLon
+    round(TITIK_KEJADIAN_LAT - _SETENGAH_TINGGI_LAT, 6),  # minLat
+    round(TITIK_KEJADIAN_LON + _SETENGAH_LEBAR_LON, 6),   # maxLon
+    round(TITIK_KEJADIAN_LAT + _SETENGAH_TINGGI_LAT, 6),  # maxLat
+]
 # asf_search menerima geometri sebagai WKT polygon, bukan bbox mentah
 WKT_AREA = (
     f"POLYGON(("
@@ -42,11 +55,10 @@ AMBANG_BATAS_DETEKSI = -18
 LOKASI_SIMPAN_DATA = "./data/"
 RIWAYAT_CSV = os.path.join(LOKASI_SIMPAN_DATA, "riwayat_analisis.csv")
 
-# Titik acuan Pulau Semau / lokasi kejadian (KM Kuala Emas) — dipakai sebagai
-# referensi jarak untuk merekomendasikan titik sampling terdekat ke pulau.
-# Sesuaikan nilai ini kalau Anda punya koordinat garis pantai yang lebih presisi.
-TITIK_ACUAN_SEMAU_LAT = -10.18
-TITIK_ACUAN_SEMAU_LON = 123.55
+# Titik acuan Pulau Semau — dipakai sebagai referensi jarak untuk
+# merekomendasikan titik sampling terdekat ke pulau.
+TITIK_ACUAN_SEMAU_LAT = TITIK_KEJADIAN_LAT
+TITIK_ACUAN_SEMAU_LON = TITIK_KEJADIAN_LON
 
 # Titik tengah area kejadian, dipakai untuk mengambil data angin historis
 CENTROID_LON = (BBOX[0] + BBOX[2]) / 2
@@ -63,10 +75,10 @@ AMBANG_ANGIN_MAKS_MS = 10.0
 st.title("🛰️ Pemantauan Tumpahan Minyak — Pulau Semau, NTT")
 st.subheader("Periode: 29 Juli – 31 Agustus 2026")
 
-st.info("""
+st.info(f"""
 📍 Lokasi: Perairan Pulau Semau, Kab. Kupang, NTT
-🔑 Titik kejadian: 10.18° LS, 123.55° BT (sekitar KM Kuala Emas)
-📏 Area pencarian: ±90 km² (sudah diperkecil)
+🔑 Titik kejadian: {abs(TITIK_KEJADIAN_LAT):.6f}° LS, {TITIK_KEJADIAN_LON:.6f}° BT (terverifikasi via Google Earth)
+📏 Area pencarian: ±36 km² (dipusatkan tepat di titik kejadian)
 🛰️ Sumber data: Sentinel-1 (SAR) — ASF DAAC NASA
 """)
 
@@ -709,7 +721,7 @@ paling dekat dengan Pulau Semau, untuk pengambilan sampel air/sedimen oleh tim l
 
         st.markdown("**Peta sebaran titik:**")
         df_peta = df_titik.rename(columns={"Lintang": "lat", "Bujur": "lon"})[["lat", "lon"]]
-        st.map(df_peta, zoom=11)
+        st.map(df_peta, zoom=14)
 
         st.download_button(
             "⬇️ Unduh Titik Sampling (.csv)",
