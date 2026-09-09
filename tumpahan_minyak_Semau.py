@@ -55,10 +55,13 @@ AMBANG_BATAS_DETEKSI = -18
 LOKASI_SIMPAN_DATA = "./data/"
 RIWAYAT_CSV = os.path.join(LOKASI_SIMPAN_DATA, "riwayat_analisis.csv")
 
-# Titik acuan Pulau Semau — dipakai sebagai referensi jarak untuk
-# merekomendasikan titik sampling terdekat ke pulau.
-TITIK_ACUAN_SEMAU_LAT = TITIK_KEJADIAN_LAT
-TITIK_ACUAN_SEMAU_LON = TITIK_KEJADIAN_LON
+# Titik acuan PULAU SEMAU itu sendiri (dari pin "Semau" di Google Earth,
+# dibaca dari status bar koordinat kursor):
+# 10°14'26.41" LS, 123°28'00.42" BT  →  desimal: -10.240669, 123.466783
+# Dipakai sebagai referensi jarak untuk merekomendasikan titik sampling
+# yang PALING DEKAT dengan pulau.
+TITIK_ACUAN_SEMAU_LAT = -10.240669
+TITIK_ACUAN_SEMAU_LON = 123.466783
 
 # Titik tengah area kejadian, dipakai untuk mengambil data angin historis
 CENTROID_LON = (BBOX[0] + BBOX[2]) / 2
@@ -78,6 +81,7 @@ st.subheader("Periode: 29 Juli – 31 Agustus 2026")
 st.info(f"""
 📍 Lokasi: Perairan Pulau Semau, Kab. Kupang, NTT
 🔑 Titik kejadian: {abs(TITIK_KEJADIAN_LAT):.6f}° LS, {TITIK_KEJADIAN_LON:.6f}° BT (terverifikasi via Google Earth)
+🏝️ Titik acuan Pulau Semau: {abs(TITIK_ACUAN_SEMAU_LAT):.6f}° LS, {TITIK_ACUAN_SEMAU_LON:.6f}° BT (pin "Semau" — Google Earth)
 📏 Area pencarian: ±36 km² (dipusatkan tepat di titik kejadian)
 🛰️ Sumber data: Sentinel-1 (SAR) — ASF DAAC NASA
 """)
@@ -720,8 +724,20 @@ paling dekat dengan Pulau Semau, untuk pengambilan sampel air/sedimen oleh tim l
         st.dataframe(df_titik, use_container_width=True)
 
         st.markdown("**Peta sebaran titik:**")
-        df_peta = df_titik.rename(columns={"Lintang": "lat", "Bujur": "lon"})[["lat", "lon"]]
-        st.map(df_peta, zoom=14)
+        df_peta = df_titik.rename(columns={"Lintang": "lat", "Bujur": "lon"})[["lat", "lon"]].copy()
+        df_peta["color"] = "#FF4B4B"  # merah = titik sampling
+        df_peta["size"] = 60
+
+        df_referensi = pd.DataFrame({
+            "lat": [TITIK_ACUAN_SEMAU_LAT],
+            "lon": [TITIK_ACUAN_SEMAU_LON],
+            "color": ["#1E88E5"],  # biru = referensi Pulau Semau
+            "size": [200],
+        })
+        df_gabungan_peta = pd.concat([df_peta, df_referensi], ignore_index=True)
+
+        st.map(df_gabungan_peta, latitude="lat", longitude="lon", color="color", size="size", zoom=13)
+        st.caption("🔴 Titik sampling · 🔵 Titik acuan Pulau Semau (pin Google Earth)")
 
         st.download_button(
             "⬇️ Unduh Titik Sampling (.csv)",
