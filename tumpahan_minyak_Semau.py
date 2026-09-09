@@ -229,21 +229,84 @@ with tab1:
 
 with tab2:
     st.subheader("Pengunduhan Citra")
+
+    if "berkas_terunduh" not in st.session_state:
+        st.session_state.berkas_terunduh = []  # daftar path hasil unduhan sesi ini
+    if "berkas_terbaru" not in st.session_state:
+        st.session_state.berkas_terbaru = None  # path unduhan paling baru, untuk tombol unduh ke komputer
+
     tautan = st.text_input("Tempel tautan unduh citra di sini:")
     if st.button("📥 Mulai Unduh") and tautan:
         try:
             sesi = buat_sesi_earthdata()
-            with st.spinner("Sedang mengunduh... ukuran ~1 GB, mohon tunggu..."):
+            with st.spinner("Sedang mengunduh dari NASA Earthdata ke server... ukuran ~1 GB, mohon tunggu..."):
                 berkas_lokal = unduh_citra(tautan, sesi)
-            st.success(f"✅ Berkas tersimpan di: `{berkas_lokal}`")
+            st.success(f"✅ Berkas tersimpan di server: `{berkas_lokal}`")
+
+            if berkas_lokal not in st.session_state.berkas_terunduh:
+                st.session_state.berkas_terunduh.append(berkas_lokal)
+            # otomatis pilih file ini sebagai default di tab Analisis
+            st.session_state.jalur_berkas_terpilih = berkas_lokal
+            st.session_state.berkas_terbaru = berkas_lokal
+            st.info("➡️ File ini sudah otomatis tersedia sebagai pilihan di tab **📊 Analisis**.")
         except Exception as e:
             st.error(f"❌ Gagal mengunduh: {e}")
             with st.expander("Detail error"):
                 st.code(traceback.format_exc())
 
+    # ---------------------------
+    # TOMBOL UNDUH KE KOMPUTER PENGGUNA
+    # ---------------------------
+    if st.session_state.berkas_terbaru and os.path.exists(st.session_state.berkas_terbaru):
+        st.divider()
+        st.markdown("**💾 Simpan file ini ke komputer Anda sendiri:**")
+        ukuran_mb = os.path.getsize(st.session_state.berkas_terbaru) / (1024 * 1024)
+        st.caption(f"Ukuran berkas: {ukuran_mb:.1f} MB — proses ini memuat seluruh file ke memori, mohon sabar untuk file besar.")
+        try:
+            with open(st.session_state.berkas_terbaru, "rb") as f:
+                st.download_button(
+                    label="⬇️ Unduh ke Komputer Saya",
+                    data=f,
+                    file_name=os.path.basename(st.session_state.berkas_terbaru),
+                    mime="application/zip",
+                )
+        except Exception as e:
+            st.error(f"❌ Gagal menyiapkan file untuk diunduh: {e}")
+
 with tab3:
     st.subheader("Analisis & Deteksi Tumpahan")
-    jalur_berkas = st.text_input("Jalur berkas citra (.zip atau .tiff) yang sudah diunduh:")
+
+    if "berkas_terunduh" not in st.session_state:
+        st.session_state.berkas_terunduh = []
+    if "jalur_berkas_terpilih" not in st.session_state:
+        st.session_state.jalur_berkas_terpilih = ""
+
+    jalur_berkas = ""
+
+    if st.session_state.berkas_terunduh:
+        opsi = ["-- pilih dari hasil unduhan --"] + st.session_state.berkas_terunduh
+        default_idx = (
+            opsi.index(st.session_state.jalur_berkas_terpilih)
+            if st.session_state.jalur_berkas_terpilih in opsi
+            else 0
+        )
+        pilihan = st.selectbox(
+            "📂 Pilih file yang sudah diunduh sebelumnya:",
+            options=opsi,
+            index=default_idx,
+        )
+        if pilihan != "-- pilih dari hasil unduhan --":
+            jalur_berkas = pilihan
+
+        st.caption("Belum ada file yang cocok? Isi manual di kolom bawah ini ⬇️")
+
+    jalur_manual = st.text_input(
+        "Atau tempel manual jalur berkas citra (.zip atau .tiff):",
+        value=jalur_berkas,
+    )
+    if jalur_manual:
+        jalur_berkas = jalur_manual
+
     ambang_pilih = st.slider("Ambang batas deteksi (dB)", -30, -10, AMBANG_BATAS_DETEKSI)
 
     if st.button("🚀 Jalankan Analisis") and jalur_berkas:
