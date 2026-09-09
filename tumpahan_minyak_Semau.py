@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 import asf_search as asf
 import rasterio
 from rasterio.enums import Resampling
+from rasterio.transform import xy as pixel_ke_koordinat
+from rasterio.warp import transform as reproyeksi_koordinat
+import scipy.ndimage as ndi
 import numpy as np
 import pandas as pd
 import requests
@@ -239,6 +242,13 @@ def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI, maks_dimens
         res_y = src.res[1] * (tinggi_asli / out_h)
         pixel_area_m2 = abs(res_x * res_y)
 
+        # Transform & CRS versi resolusi diperkecil — dibutuhkan untuk mengonversi
+        # posisi piksel area terdeteksi menjadi koordinat lintang/bujur asli (titik sampling)
+        transform_baru = src.transform * src.transform.scale(
+            lebar_asli / out_w, tinggi_asli / out_h
+        )
+        crs_asli = src.crs
+
     data_dB = 10 * np.log10(np.abs(data) + 1e-10)
     del data  # bebaskan memori array resolusi menengah secepat mungkin
 
@@ -247,7 +257,78 @@ def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI, maks_dimens
     luasan_m2 = piksel_tumpah * pixel_area_m2
     luasan_km2 = round(luasan_m2 / 1_000_000, 4)
 
-    return mask_tumpahan, luasan_km2, data_dB
+    return mask_tumpahan, luasan_km2, data_dB, transform_baru, crs_asli, pixel_area_m2
+
+
+# ---------------------------
+# FUNGSI TITIK REKOMENDASI SAMPLING LAPANGAN
+# ---------------------------
+def hitung_titik_sampling(mask, transform, crs, pixel_area_m2, maks_patch=5, min_piksel_patch=4):
+    """
+    Mengidentifikasi area/patch terpisah dalam mask deteksi, lalu menghitung
+    koordinat (lintang, bujur) untuk titik pusat dan titik tepi (utara, selatan,
+    timur, barat) tiap patch — sebagai rekomendasi lokasi sampling lapangan
+    (air laut/sedimen) untuk verifikasi konsentrasi hidrokarbon.
+
+    SAR hanya mendeteksi KEBERADAAN & LUAS, bukan konsentrasi — titik-titik ini
+    adalah usulan lokasi sampling, bukan hasil pengukuran konsentrasi.
+    """
+    berlabel, jumlah_patch = ndi.label(mask)
+    if jumlah_patch == 0:
+        return pd.DataFrame(columns=[
+            "Patch", "Titik", "Lintang", "Bujur", "Luas Patch (km2)", "Jumlah Piksel"
+        ])
+
+    # Urutkan patch dari yang terbesar, buang yang terlalu kecil (kemungkinan noise)
+    ukuran_patch = ndi.sum(mask, berlabel, range(1, jumlah_patch + 1))
+    urutan_label = np.argsort(ukuran_patch)[::-1] + 1  # label dimulai dari 1
+    urutan_label = [
+        lbl for lbl in urutan_label if ukuran_patch[lbl - 1] >= min_piksel_patch
+    ][:maks_patch]
+
+    def _konversi(baris_kol_list):
+        """list of (row, col) -> list of (lon, lat) dalam EPSG:4326"""
+        xs, ys = [], []
+        for r, c in baris_kol_list:
+            x, y = pixel_ke_koordinat(transform, r, c)
+            xs.append(x)
+            ys.append(y)
+        if crs is not None and crs.to_epsg() != 4326:
+            lons, lats = reproyeksi_koordinat(crs, "EPSG:4326", xs, ys)
+        else:
+            lons, lats = xs, ys
+        return list(zip(lons, lats))
+
+    daftar_baris = []
+    for i, lbl in enumerate(urutan_label, start=1):
+        rows, cols = np.where(berlabel == lbl)
+        n_piksel = len(rows)
+        luas_patch_km2 = round((n_piksel * pixel_area_m2) / 1_000_000, 4)
+
+        titik_pusat_rc = [(float(rows.mean()), float(cols.mean()))]
+        titik_tepi_rc = [
+            ("Utara", (rows.min(), cols[rows.argmin()])),
+            ("Selatan", (rows.max(), cols[rows.argmax()])),
+            ("Barat", (rows[cols.argmin()], cols.min())),
+            ("Timur", (rows[cols.argmax()], cols.max())),
+        ]
+
+        (lon_pusat, lat_pusat), = _konversi(titik_pusat_rc)
+        daftar_baris.append({
+            "Patch": i, "Titik": "Pusat (centroid)",
+            "Lintang": round(lat_pusat, 6), "Bujur": round(lon_pusat, 6),
+            "Luas Patch (km2)": luas_patch_km2, "Jumlah Piksel": n_piksel,
+        })
+
+        koords_tepi = _konversi([rc for _, rc in titik_tepi_rc])
+        for (nama_tepi, _), (lon_t, lat_t) in zip(titik_tepi_rc, koords_tepi):
+            daftar_baris.append({
+                "Patch": i, "Titik": f"Tepi - {nama_tepi}",
+                "Lintang": round(lat_t, 6), "Bujur": round(lon_t, 6),
+                "Luas Patch (km2)": luas_patch_km2, "Jumlah Piksel": n_piksel,
+            })
+
+    return pd.DataFrame(daftar_baris)
 
 
 # ---------------------------
@@ -355,7 +436,9 @@ def simpan_baris_riwayat(baris: dict):
 # ---------------------------
 # TAMPILAN APLIKASI
 # ---------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Cari Citra", "📥 Unduh", "📊 Analisis", "📈 Time Series"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["🔍 Cari Citra", "📥 Unduh", "📊 Analisis", "📈 Time Series", "🧭 Titik Sampling"]
+)
 
 with tab1:
     if st.button("🔍 Cari Citra Satelit", type="primary"):
@@ -462,7 +545,9 @@ with tab3:
     if st.button("🚀 Jalankan Analisis") and jalur_berkas:
         try:
             with st.spinner("Memproses citra..."):
-                mask, luas, dB_data = deteksi_tumpahan(jalur_berkas, ambang_pilih)
+                mask, luas, dB_data, transform_citra, crs_citra, pixel_area_m2 = deteksi_tumpahan(
+                    jalur_berkas, ambang_pilih
+                )
             st.metric("📐 Luas perkiraan tumpahan", f"{luas} km²")
             st.info(f"Ambang batas yang digunakan: {ambang_pilih} dB")
             st.warning("⚠️ Hasil berupa perkiraan — perlu verifikasi lapangan atau visual.")
@@ -511,6 +596,28 @@ with tab3:
                 "Waktu Analisis": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             })
             st.success("📈 Hasil analisis ini sudah ditambahkan ke tab **Time Series**.")
+
+            # ---------------------------
+            # HITUNG TITIK REKOMENDASI SAMPLING
+            # ---------------------------
+            try:
+                if luas > 0:
+                    df_titik = hitung_titik_sampling(
+                        mask, transform_citra, crs_citra, pixel_area_m2
+                    )
+                    st.session_state.df_titik_sampling = df_titik
+                    st.session_state.info_titik_sampling = {
+                        "Berkas": os.path.basename(jalur_berkas),
+                        "Tanggal Citra": waktu_citra.strftime("%Y-%m-%d %H:%M UTC"),
+                    }
+                    st.success(
+                        f"🧭 {len(df_titik)} titik rekomendasi sampling sudah dihitung — "
+                        "cek tab **🧭 Titik Sampling**."
+                    )
+                else:
+                    st.session_state.df_titik_sampling = None
+            except Exception as e:
+                st.warning(f"Tidak bisa menghitung titik sampling: {e}")
         except Exception as e:
             st.error(f"❌ Gagal memproses citra: {e}")
             with st.expander("Detail error"):
@@ -565,6 +672,50 @@ with tab4:
             st.rerun()
         except Exception as e:
             st.error(f"❌ Gagal membaca file riwayat: {e}")
+
+with tab5:
+    st.subheader("🧭 Titik Rekomendasi Sampling Lapangan")
+
+    st.info("""
+📌 **Penting:** SAR hanya mendeteksi keberadaan & luas tumpahan, BUKAN konsentrasi
+hidrokarbon. Titik-titik di bawah ini adalah rekomendasi LOKASI untuk pengambilan
+sampel air/sedimen oleh tim lapangan — konsentrasi hidrokarbon (TPH/PAH) hanya bisa
+diketahui lewat analisis laboratorium (GC-MS) atas sampel yang diambil di titik-titik ini.
+""")
+
+    if "df_titik_sampling" not in st.session_state:
+        st.session_state.df_titik_sampling = None
+
+    df_titik = st.session_state.df_titik_sampling
+
+    if df_titik is None or df_titik.empty:
+        st.warning(
+            "Belum ada titik sampling. Jalankan analisis di tab **📊 Analisis** terlebih "
+            "dahulu pada citra yang menunjukkan area terdeteksi (luas > 0)."
+        )
+    else:
+        info = st.session_state.get("info_titik_sampling", {})
+        if info:
+            st.caption(f"Dihitung dari citra: `{info.get('Berkas', '-')}` — {info.get('Tanggal Citra', '-')}")
+
+        st.markdown("**Tabel koordinat titik sampling:**")
+        st.dataframe(df_titik, use_container_width=True)
+
+        st.markdown("**Peta sebaran titik:**")
+        df_peta = df_titik.rename(columns={"Lintang": "lat", "Bujur": "lon"})[["lat", "lon"]]
+        st.map(df_peta, zoom=11)
+
+        st.download_button(
+            "⬇️ Unduh Titik Sampling (.csv)",
+            data=df_titik.to_csv(index=False).encode("utf-8"),
+            file_name="titik_rekomendasi_sampling.csv",
+            mime="text/csv",
+        )
+
+        st.caption(
+            "💡 Tip: buka file CSV ini di Google Maps / Google Earth (fitur 'Import') atau "
+            "aplikasi GPS lapangan untuk navigasi langsung ke titik-titik sampling."
+        )
 
 st.divider()
 st.caption("""
