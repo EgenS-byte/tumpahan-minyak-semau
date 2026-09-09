@@ -15,7 +15,6 @@ import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import xy as pixel_ke_koordinat
 from rasterio.warp import transform as reproyeksi_koordinat
-import scipy.ndimage as ndi
 import numpy as np
 import pandas as pd
 import requests
@@ -42,6 +41,12 @@ TANGGAL_AKHIR = "2026-08-31T23:59:59Z"
 AMBANG_BATAS_DETEKSI = -18
 LOKASI_SIMPAN_DATA = "./data/"
 RIWAYAT_CSV = os.path.join(LOKASI_SIMPAN_DATA, "riwayat_analisis.csv")
+
+# Titik acuan Pulau Semau / lokasi kejadian (KM Kuala Emas) — dipakai sebagai
+# referensi jarak untuk merekomendasikan titik sampling terdekat ke pulau.
+# Sesuaikan nilai ini kalau Anda punya koordinat garis pantai yang lebih presisi.
+TITIK_ACUAN_SEMAU_LAT = -10.18
+TITIK_ACUAN_SEMAU_LON = 123.55
 
 # Titik tengah area kejadian, dipakai untuk mengambil data angin historis
 CENTROID_LON = (BBOX[0] + BBOX[2]) / 2
@@ -263,72 +268,72 @@ def deteksi_tumpahan(jalur_citra, ambang_batas=AMBANG_BATAS_DETEKSI, maks_dimens
 # ---------------------------
 # FUNGSI TITIK REKOMENDASI SAMPLING LAPANGAN
 # ---------------------------
-def hitung_titik_sampling(mask, transform, crs, pixel_area_m2, maks_patch=5, min_piksel_patch=4):
+def hitung_titik_sampling(
+    mask, transform, crs, pixel_area_m2,
+    jumlah_titik=10, jarak_minimum_antar_titik_m=200,
+):
     """
-    Mengidentifikasi area/patch terpisah dalam mask deteksi, lalu menghitung
-    koordinat (lintang, bujur) untuk titik pusat dan titik tepi (utara, selatan,
-    timur, barat) tiap patch — sebagai rekomendasi lokasi sampling lapangan
-    (air laut/sedimen) untuk verifikasi konsentrasi hidrokarbon.
+    Mengambil piksel-piksel area terdeteksi (True di mask), mengonversinya ke
+    koordinat lintang/bujur, lalu memilih sejumlah `jumlah_titik` titik yang
+    PALING DEKAT dengan Pulau Semau (TITIK_ACUAN_SEMAU_LAT/LON) sebagai
+    rekomendasi lokasi sampling lapangan (air laut/sedimen).
+
+    Titik-titik dipilih secara greedy dari yang terdekat, dengan jarak minimum
+    antar titik (`jarak_minimum_antar_titik_m`) supaya tidak semua titik
+    menumpuk di satu area kecil yang sama — biar sebaran sampel representatif.
 
     SAR hanya mendeteksi KEBERADAAN & LUAS, bukan konsentrasi — titik-titik ini
-    adalah usulan lokasi sampling, bukan hasil pengukuran konsentrasi.
+    adalah usulan lokasi sampling, bukan hasil pengukuran konsentrasi hidrokarbon.
     """
-    berlabel, jumlah_patch = ndi.label(mask)
-    if jumlah_patch == 0:
+    rows, cols = np.where(mask)
+    if len(rows) == 0:
         return pd.DataFrame(columns=[
-            "Patch", "Titik", "Lintang", "Bujur", "Luas Patch (km2)", "Jumlah Piksel"
+            "No", "Lintang", "Bujur", "Jarak ke Pulau Semau (m)"
         ])
 
-    # Urutkan patch dari yang terbesar, buang yang terlalu kecil (kemungkinan noise)
-    ukuran_patch = ndi.sum(mask, berlabel, range(1, jumlah_patch + 1))
-    urutan_label = np.argsort(ukuran_patch)[::-1] + 1  # label dimulai dari 1
-    urutan_label = [
-        lbl for lbl in urutan_label if ukuran_patch[lbl - 1] >= min_piksel_patch
-    ][:maks_patch]
+    # Konversi seluruh piksel terdeteksi ke lon/lat (vectorized)
+    xs, ys = pixel_ke_koordinat(transform, rows, cols)
+    xs, ys = np.array(xs), np.array(ys)
+    if crs is not None and crs.to_epsg() != 4326:
+        lons, lats = reproyeksi_koordinat(crs, "EPSG:4326", xs.tolist(), ys.tolist())
+        lons, lats = np.array(lons), np.array(lats)
+    else:
+        lons, lats = xs, ys
 
-    def _konversi(baris_kol_list):
-        """list of (row, col) -> list of (lon, lat) dalam EPSG:4326"""
-        xs, ys = [], []
-        for r, c in baris_kol_list:
-            x, y = pixel_ke_koordinat(transform, r, c)
-            xs.append(x)
-            ys.append(y)
-        if crs is not None and crs.to_epsg() != 4326:
-            lons, lats = reproyeksi_koordinat(crs, "EPSG:4326", xs, ys)
-        else:
-            lons, lats = xs, ys
-        return list(zip(lons, lats))
+    # Jarak tiap piksel ke titik acuan Pulau Semau (aproksimasi datar, cukup
+    # akurat untuk area sekecil ini — dalam meter)
+    m_per_derajat_lat = 110_540.0
+    m_per_derajat_lon = 111_320.0 * np.cos(np.radians(TITIK_ACUAN_SEMAU_LAT))
+    dx = (lons - TITIK_ACUAN_SEMAU_LON) * m_per_derajat_lon
+    dy = (lats - TITIK_ACUAN_SEMAU_LAT) * m_per_derajat_lat
+    jarak_m = np.sqrt(dx**2 + dy**2)
 
-    daftar_baris = []
-    for i, lbl in enumerate(urutan_label, start=1):
-        rows, cols = np.where(berlabel == lbl)
-        n_piksel = len(rows)
-        luas_patch_km2 = round((n_piksel * pixel_area_m2) / 1_000_000, 4)
+    urutan = np.argsort(jarak_m)  # dari yang terdekat
 
-        titik_pusat_rc = [(float(rows.mean()), float(cols.mean()))]
-        titik_tepi_rc = [
-            ("Utara", (rows.min(), cols[rows.argmin()])),
-            ("Selatan", (rows.max(), cols[rows.argmax()])),
-            ("Barat", (rows[cols.argmin()], cols.min())),
-            ("Timur", (rows[cols.argmax()], cols.max())),
-        ]
-
-        (lon_pusat, lat_pusat), = _konversi(titik_pusat_rc)
-        daftar_baris.append({
-            "Patch": i, "Titik": "Pusat (centroid)",
-            "Lintang": round(lat_pusat, 6), "Bujur": round(lon_pusat, 6),
-            "Luas Patch (km2)": luas_patch_km2, "Jumlah Piksel": n_piksel,
-        })
-
-        koords_tepi = _konversi([rc for _, rc in titik_tepi_rc])
-        for (nama_tepi, _), (lon_t, lat_t) in zip(titik_tepi_rc, koords_tepi):
-            daftar_baris.append({
-                "Patch": i, "Titik": f"Tepi - {nama_tepi}",
-                "Lintang": round(lat_t, 6), "Bujur": round(lon_t, 6),
-                "Luas Patch (km2)": luas_patch_km2, "Jumlah Piksel": n_piksel,
+    titik_terpilih = []
+    koord_terpilih = []
+    for idx in urutan:
+        lon_c, lat_c = lons[idx], lats[idx]
+        # Pastikan cukup jauh dari titik yang sudah dipilih (hindari menumpuk)
+        cukup_jauh = all(
+            np.sqrt(
+                ((lon_c - lo) * m_per_derajat_lon) ** 2
+                + ((lat_c - la) * m_per_derajat_lat) ** 2
+            ) >= jarak_minimum_antar_titik_m
+            for lo, la in koord_terpilih
+        )
+        if cukup_jauh:
+            titik_terpilih.append({
+                "No": len(titik_terpilih) + 1,
+                "Lintang": round(float(lat_c), 6),
+                "Bujur": round(float(lon_c), 6),
+                "Jarak ke Pulau Semau (m)": round(float(jarak_m[idx]), 1),
             })
+            koord_terpilih.append((lon_c, lat_c))
+        if len(titik_terpilih) >= jumlah_titik:
+            break
 
-    return pd.DataFrame(daftar_baris)
+    return pd.DataFrame(titik_terpilih)
 
 
 # ---------------------------
@@ -674,13 +679,14 @@ with tab4:
             st.error(f"❌ Gagal membaca file riwayat: {e}")
 
 with tab5:
-    st.subheader("🧭 Titik Rekomendasi Sampling Lapangan")
+    st.subheader("🧭 10 Titik Rekomendasi Sampling Terdekat dengan Pulau Semau")
 
     st.info("""
 📌 **Penting:** SAR hanya mendeteksi keberadaan & luas tumpahan, BUKAN konsentrasi
-hidrokarbon. Titik-titik di bawah ini adalah rekomendasi LOKASI untuk pengambilan
-sampel air/sedimen oleh tim lapangan — konsentrasi hidrokarbon (TPH/PAH) hanya bisa
-diketahui lewat analisis laboratorium (GC-MS) atas sampel yang diambil di titik-titik ini.
+hidrokarbon. 10 titik di bawah ini adalah rekomendasi LOKASI di area terdeteksi yang
+paling dekat dengan Pulau Semau, untuk pengambilan sampel air/sedimen oleh tim lapangan
+— konsentrasi hidrokarbon (TPH/PAH) hanya bisa diketahui lewat analisis laboratorium
+(GC-MS) atas sampel yang diambil di titik-titik ini. Diurutkan dari yang paling dekat.
 """)
 
     if "df_titik_sampling" not in st.session_state:
